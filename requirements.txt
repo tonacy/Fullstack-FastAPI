@@ -1,0 +1,10 @@
+psycopg2-binary
+python-dotenv
+databases[asyncpg]
+databases[aiosqlite]
+fastapi
+uvicorn
+sqlalchemy
+itsdangerous
+pydantic>=2.7.0
+pydantic-settings
