@@ -7,7 +7,7 @@ from fastapi.responses import RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
-from backend.app.core.init_settings import args
+from backend.app.core.init_settings import args, global_settings
 from backend.app.api.v1.endpoints import message, doc, base
 from backend.app.dependencies.database import init_db, AsyncSessionLocal
 from backend.app.crud.message import create_message_dict_async
@@ -37,7 +37,7 @@ app.mount("/static", StaticFiles(directory="frontend/login/static"), name="stati
 # Set Middleware
 # Define the allowed origins
 origins = [
-    os.getenv("API_BASE_URL", ""),
+    global_settings.API_BASE_URL,
     "http://localhost",
     "http://localhost:5000",
 ]
