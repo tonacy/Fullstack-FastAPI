@@ -2,9 +2,8 @@ psycopg2-binary
 python-dotenv
 databases[asyncpg]
 databases[aiosqlite]
-fastapi
+fastapi<=0.111.0
 uvicorn
-Jinja2
 sqlalchemy
 itsdangerous
 pydantic>=2.7.0
