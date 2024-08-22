@@ -4,6 +4,7 @@ databases[asyncpg]
 databases[aiosqlite]
 fastapi
 uvicorn
+Jinja2
 sqlalchemy
 itsdangerous
 pydantic>=2.7.0
