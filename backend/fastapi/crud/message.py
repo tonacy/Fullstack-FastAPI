@@ -3,9 +3,9 @@ from uuid import UUID
 from fastapi import Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy.ext.asyncio import AsyncSession
-from backend.app.dependencies.database import get_sync_db, get_async_db
-from backend.app.models import Message
-from backend.app.schemas import (
+from backend.fastapi.dependencies.database import get_sync_db, get_async_db
+from backend.fastapi.models import Message
+from backend.fastapi.schemas import (
     MessageBase,
     MessageCreate,
 )

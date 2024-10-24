@@ -2,7 +2,7 @@ import uuid
 from sqlalchemy import Column, Integer, String, ForeignKey
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import UUID, ENUM
-from backend.app.dependencies.database import Base
+from backend.fastapi.dependencies.database import Base
 
 class Message(Base):
     __tablename__ = "messages"

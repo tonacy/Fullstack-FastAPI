@@ -1,0 +1,1 @@
+from backend.fastapi.schemas.message import MessageBase, MessageCreate, MessageSchema
