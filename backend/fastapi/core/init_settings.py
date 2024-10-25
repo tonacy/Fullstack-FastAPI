@@ -1,12 +1,17 @@
 import argparse
-import os
 from backend.fastapi.core.config import get_settings
 
-# Command-line argument parsing
-parser = argparse.ArgumentParser(description="Run the FastAPI application.")
-parser.add_argument("--mode", choices=["dev", "prod"], default="dev", help="Run mode: 'dev' or 'prod'")
-parser.add_argument("--host", default="127.0.0.1", help="Host IP address")
-args = parser.parse_args()
+# Set up the argument parser
+parser = argparse.ArgumentParser()
+parser.add_argument("--mode", choices=["dev", "prod"], default="dev", help="Set the running mode")
+parser.add_argument("--host", type=str, default="127.0.0.1", help="Set the host")
+
+# Only parse arguments if the script is run directly
+if __name__ == "__main__":
+    args = parser.parse_args()
+else:
+    # Provide default values or mock args when imported
+    args = argparse.Namespace(mode="dev", host="127.0.0.1")
 
 # Initialize and update settings
 settings = get_settings(args.mode)
