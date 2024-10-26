@@ -1,0 +1,158 @@
+apiVersion: zeabur.com/v1
+kind: Template
+metadata:
+    name: FastAPI - PostgreSQL
+spec:
+    description: A comprehensive FastAPI and PostgreSQL template.
+    icon: https://raw.githubusercontent.com/yuting1214/logo-store/refs/heads/main/assets/fastapi.svg
+    coverImage:
+    variables:
+        - key: PUBLIC_DOMAIN
+          type: DOMAIN
+          name: Domain
+          description: What is the domain you want for your FastAPI?
+        - key: USER_NAME
+          type: STRING
+          name: User Name
+          description: User name for accessing backend API document.
+        - key: PASSWORD
+          type: STRING
+          name: Password
+          description: Password for accessing backend API document.
+    tags:
+        - API
+        - Tool
+    readme: |-
+      ## Overview
+
+      FastAPI is a modern, fast (high-performance), web framework for building APIs with Python 3.7+ based on standard Python type hints.
+
+      ## Highlights
+
+      **PostgreSQL integration**: Seamlessly integrate with PostgreSQL databases using powerful ORMs like SQLAlchemy, enabling efficient data management and complex query handling.
+
+      **OpenAPI document authentication**: Automatically generate interactive API documentation with integrated authentication mechanisms, making it easy to secure your endpoints and provide clear, concise documentation for developers.
+
+      **Asynchronous SQLAlchemy**:  Leverage SQLAlchemy 2.0 to support asynchronous programming, allowing for non-blocking database operations and improved performance,
+
+      ## Learn More
+
+      * [Github](https://github.com/yuting1214/Fullstack-FastAPI)
+    services:
+        - name: postgresql
+          icon: https://raw.githubusercontent.com/zeabur/service-icons/main/marketplace/postgresql.svg
+          template: PREBUILT
+          spec:
+            source:
+                image: postgres:17
+                command:
+                    - docker-entrypoint.sh
+                    - -c
+                    - config_file=/etc/postgresql/postgresql.conf
+            ports:
+                - id: database
+                  port: 5432
+                  type: TCP
+            volumes:
+                - id: data
+                  dir: /var/lib/postgresql/data
+            instructions:
+                - type: TEXT
+                  title: Connection String
+                  content: postgresql://${POSTGRES_USERNAME}:${POSTGRES_PASSWORD}@${PORT_FORWARDED_HOSTNAME}:${DATABASE_PORT_FORWARDED_PORT}/${POSTGRES_DATABASE}
+                - type: TEXT
+                  title: PostgreSQL Connect Command
+                  content: psql "postgresql://${POSTGRES_USERNAME}:${POSTGRES_PASSWORD}@${PORT_FORWARDED_HOSTNAME}:${DATABASE_PORT_FORWARDED_PORT}/${POSTGRES_DATABASE}"
+                - type: TEXT
+                  title: PostgreSQL username
+                  content: ${POSTGRES_USERNAME}
+                  category: Credentials
+                - type: PASSWORD
+                  title: PostgresSQL password
+                  content: ${POSTGRES_PASSWORD}
+                  category: Credentials
+                - type: TEXT
+                  title: PostgresSQL database
+                  content: ${POSTGRES_DATABASE}
+                  category: Credentials
+                - type: TEXT
+                  title: PostgreSQL host
+                  content: ${PORT_FORWARDED_HOSTNAME}
+                  category: Hostname & Port
+                - type: TEXT
+                  title: PostgreSQL port
+                  content: ${DATABASE_PORT_FORWARDED_PORT}
+                  category: Hostname & Port
+            env:
+                PGDATA:
+                    default: /var/lib/postgresql/data/pgdata
+                POSTGRES_CONNECTION_STRING:
+                    default: postgresql://${POSTGRES_USERNAME}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DATABASE}
+                    expose: true
+                    readonly: true
+                POSTGRES_DATABASE:
+                    default: ${POSTGRES_DB}
+                    expose: true
+                    readonly: true
+                POSTGRES_DB:
+                    default: zeabur
+                POSTGRES_HOST:
+                    default: ${CONTAINER_HOSTNAME}
+                    expose: true
+                    readonly: true
+                POSTGRES_PASSWORD:
+                    default: ${PG_PASSWORD}
+                    expose: true
+                POSTGRES_PORT:
+                    default: ${DATABASE_PORT}
+                    expose: true
+                    readonly: true
+                POSTGRES_URI:
+                    default: ${POSTGRES_CONNECTION_STRING}
+                    expose: true
+                    readonly: true
+                POSTGRES_USER:
+                    default: root
+                    expose: true
+                POSTGRES_USERNAME:
+                    default: ${POSTGRES_USER}
+                    expose: true
+                    readonly: true
+            configs:
+                - path: /etc/postgresql/postgresql.conf
+                  template: |
+                    # https://github.com/postgres/postgres/blob/master/src/backend/utils/misc/postgresql.conf.sample
+                    listen_addresses = '*'
+                    max_connections = 100
+                    shared_buffers = 128MB
+                    dynamic_shared_memory_type = posix
+                    max_wal_size = 1GB
+                    min_wal_size = 80MB
+                    log_timezone = 'Etc/UTC'
+                    datestyle = 'iso, mdy'
+                    timezone = 'Etc/UTC'
+                    lc_messages = 'en_US.utf8'
+                    lc_monetary = 'en_US.utf8'
+                    lc_numeric = 'en_US.utf8'
+                    lc_time = 'en_US.utf8'
+                    default_text_search_config = 'pg_catalog.english'
+                  permission: null
+        - name: fastapi-postgresql
+          icon: https://raw.githubusercontent.com/yuting1214/logo-store/refs/heads/main/assets/fastapi.svg
+          template: GIT
+          spec:
+            source:
+                source: GITHUB
+                repo: 817100767
+                branch: main
+            ports:
+                - id: web
+                  port: 8080
+                  type: HTTP
+            env:
+                HOST_URL:
+                    default: ${ZEABUR_WEB_URL}
+                DATABASE_URL:
+                    default: ${POSTGRES_CONNECTION_STRING}
+          domainKey: PUBLIC_DOMAIN         
+                  
