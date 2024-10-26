@@ -1,3 +1,4 @@
+import sys
 import argparse
 from backend.fastapi.core.config import get_settings
 
@@ -6,12 +7,15 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--mode", choices=["dev", "prod"], default="dev", help="Set the running mode")
 parser.add_argument("--host", type=str, default="127.0.0.1", help="Set the host")
 
-# Only parse arguments if the script is run directly
-if __name__ == "__main__":
-    args = parser.parse_args()
-else:
-    # Provide default values or mock args when imported
+# Determine if running under pytest
+is_testing = "pytest" in sys.argv[0]
+
+if is_testing:
+    # Provide default or mock arguments when imported for testing
     args = argparse.Namespace(mode="dev", host="127.0.0.1")
+else:
+    # Parse arguments only when running the script directly
+    args = parser.parse_args()
 
 # Initialize and update settings
 settings = get_settings(args.mode)

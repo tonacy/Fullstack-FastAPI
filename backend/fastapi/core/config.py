@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     # Application settings
     APP_NAME: str = "My App"
-    APP_VERSION: str = "0.1.0"
+    APP_VERSION: str = "1.0.0"
 
     # Username and Password for login
     USER_NAME: str = os.getenv('USER_NAME', '')
