@@ -1,5 +1,4 @@
-from typing import Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from uuid import UUID
 
 class MessageBase(BaseModel):
@@ -11,5 +10,4 @@ class MessageCreate(MessageBase):
 class MessageSchema(MessageBase):
     id: UUID
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)

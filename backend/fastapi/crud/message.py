@@ -10,7 +10,6 @@ from backend.fastapi.schemas import (
     MessageCreate,
 )
 
-
 class MessageService:
     def __init__(self, db_sync: Session = Depends(get_sync_db), db_async: AsyncSession = Depends(get_async_db)):
         self.db_sync = db_sync
@@ -43,7 +42,7 @@ class MessageService:
         db_message = self.db_sync.query(Message).filter(Message.id == message_id).first()
         if db_message is None:
             raise HTTPException(status_code=404, detail="Message not found")
-        for key, value in message_data.dict(exclude_unset=True).items():
+        for key, value in message_data.model_dump(exclude_unset=True).items():
             setattr(db_message, key, value)
         self.db_sync.commit()
         self.db_sync.refresh(db_message)
