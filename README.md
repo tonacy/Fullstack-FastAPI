@@ -8,11 +8,17 @@ tags:
   - postgresql
 ---
 
+<!-- LINK GROUP -->
+[deploy-on-zeabur-button-image]: https://zeabur.com/button.svg
+[deploy-on-zeabur-link]: https://zeabur.com/templates/A2TNYB
+
 # FastAPI FullStack Example
 
 This example starts up a [FastAPI](https://fastapi.tiangolo.com/) server with [PostgreSQL](https://www.postgresql.org/) as backend.
 
 [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/template/IhHgYS?referralCode=jk_FgY)
+[![][deploy-on-zeabur-button-image]][deploy-on-zeabur-link]
+
 ## ✨ Features
 
 - FastAPI
