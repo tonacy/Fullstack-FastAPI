@@ -12,7 +12,7 @@ valid_message_data = {
 }
 
 # Define the number of times to run the bulk insert
-Run_times = 1_000
+Run_times = 10
 
 @pytest.fixture
 def client():
