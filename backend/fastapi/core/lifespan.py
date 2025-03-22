@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from backend.fastapi.dependencies.database import init_db, AsyncSessionLocal
 from backend.fastapi.crud.message import create_message_dict_async
 from backend.data.init_data import models_data
+from backend.fastapi.api.v1.endpoints.reddit import start_streaming
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -16,5 +17,10 @@ async def lifespan(app: FastAPI):
                 await create_message_dict_async(db, raw_data)
         finally:
             await db.close()
-
+    
+    # Start Reddit comment streaming
+    await start_streaming()
+    
     yield
+    
+    # Cleanup code here if needed

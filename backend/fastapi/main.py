@@ -23,6 +23,8 @@ setup_session(app)
 # Setup Routers
 setup_routers(app)
 
+# Reddit streaming is started automatically by the lifespan
+
 if __name__ == "__main__":
     uvicorn.run(
         app="backend.fastapi.main:app",

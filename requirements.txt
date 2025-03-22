@@ -1,12 +1,15 @@
 trio
-psycopg2-binary
 python-dotenv
 databases[asyncpg]
 databases[aiosqlite]
 fastapi<=0.111.0
-uvicorn
 sqlalchemy
 itsdangerous
 pytest
 pydantic>=2.7.0
 pydantic-settings
+hypercorn==0.14.4
+asyncpraw==7.8.1
+uvicorn==0.29.0
+psycopg2-binary==2.9.9
+aiohttp
