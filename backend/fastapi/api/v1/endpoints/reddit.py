@@ -102,7 +102,7 @@ except Exception as e:
 
 # For testing - track number of matches
 match_count = 0
-MAX_TEST_MATCHES = 5
+MAX_TEST_MATCHES = 100
 
 # Models for keyword operations
 class KeywordGroupUpdate(BaseModel):
