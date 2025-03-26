@@ -259,7 +259,6 @@ async def call_webhook(client_id, match_data):
 
 async def check_content_for_keywords(content_text, content_type, permalink, subreddit_obj, timestamp, subreddit_name):
     """Process content (comment or submission) and check for keyword matches."""
-    global match_count
     
     # Lowercase the text and split into words
     content_text_lower = content_text.lower()
@@ -295,13 +294,8 @@ async def check_content_for_keywords(content_text, content_type, permalink, subr
                     await save_match(match_data)
                     # Call webhook if client has one configured
                     await call_webhook(client_id, match_data)
-                    match_count += 1
-                    logger.info(f"MATCH #{match_count}/{MAX_TEST_MATCHES}: {client_id}/{group_id}: {keyword} - {content_type} - r/{subreddit_name} - {content_text[:100]}...")
+                    logger.info(f"MATCH: {client_id}/{group_id}: {keyword} - {content_type} - r/{subreddit_name} - {content_text[:100]}...")
                     
-                    if match_count >= MAX_TEST_MATCHES:
-                        logger.info(f"Test complete: Found {match_count} matches. Stopping stream.")
-                        return True
-    
     return False
 
 async def start_subreddit_stream(subreddit_name: str):
@@ -395,7 +389,6 @@ async def update_active_streams():
 
 async def stream_subreddit_comments(subreddit_name: str):
     """Stream comments from a specific subreddit."""
-    global match_count
     
     if not REDDIT_CREDENTIALS_AVAILABLE:
         logger.error(f"Cannot stream comments for {subreddit_name}: Reddit API credentials not configured")
@@ -406,13 +399,9 @@ async def stream_subreddit_comments(subreddit_name: str):
         subreddit = await reddit_client.subreddit(subreddit_name)
         logger.info(f"Starting to stream comments from r/{subreddit_name}")
         
-        while match_count < MAX_TEST_MATCHES:
+        while True:
             try:
                 async for comment in subreddit.stream.comments():
-                    if match_count >= MAX_TEST_MATCHES:
-                        logger.info(f"Test complete: Found {match_count} matches. Stopping comment stream for r/{subreddit_name}.")
-                        return
-                    
                     # Get comment text
                     comment_text = comment.body
                     
@@ -427,7 +416,7 @@ async def stream_subreddit_comments(subreddit_name: str):
                     timestamp = datetime.fromtimestamp(comment.created_utc).isoformat()
                     
                     # Check for keywords
-                    stop_streaming = await check_content_for_keywords(
+                    await check_content_for_keywords(
                         comment_text,
                         "comment",
                         permalink,
@@ -435,9 +424,6 @@ async def stream_subreddit_comments(subreddit_name: str):
                         timestamp,
                         str(comment.subreddit)
                     )
-                    
-                    if stop_streaming:
-                        return
             except Exception as e:
                 logger.error(f"Comment stream error for r/{subreddit_name}, reconnecting: {e}")
                 await asyncio.sleep(5)
@@ -449,7 +435,6 @@ async def stream_subreddit_comments(subreddit_name: str):
 
 async def stream_subreddit_submissions(subreddit_name: str):
     """Stream submissions from a specific subreddit."""
-    global match_count
     
     if not REDDIT_CREDENTIALS_AVAILABLE:
         logger.error(f"Cannot stream submissions for {subreddit_name}: Reddit API credentials not configured")
@@ -460,13 +445,9 @@ async def stream_subreddit_submissions(subreddit_name: str):
         subreddit = await reddit_client.subreddit(subreddit_name)
         logger.info(f"Starting to stream submissions from r/{subreddit_name}")
         
-        while match_count < MAX_TEST_MATCHES:
+        while True:
             try:
                 async for submission in subreddit.stream.submissions():
-                    if match_count >= MAX_TEST_MATCHES:
-                        logger.info(f"Test complete: Found {match_count} matches. Stopping submission stream for r/{subreddit_name}.")
-                        return
-                    
                     # Get content from either title or selftext
                     title_text = submission.title
                     selftext = getattr(submission, "selftext", "")
@@ -483,7 +464,7 @@ async def stream_subreddit_submissions(subreddit_name: str):
                     timestamp = datetime.fromtimestamp(submission.created_utc).isoformat()
                     
                     # Check for keywords
-                    stop_streaming = await check_content_for_keywords(
+                    await check_content_for_keywords(
                         combined_text,
                         "submission",
                         permalink,
@@ -491,9 +472,6 @@ async def stream_subreddit_submissions(subreddit_name: str):
                         timestamp,
                         str(submission.subreddit)
                     )
-                    
-                    if stop_streaming:
-                        return
             except Exception as e:
                 logger.error(f"Submission stream error for r/{subreddit_name}, reconnecting: {e}")
                 await asyncio.sleep(5)
