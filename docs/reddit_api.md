@@ -6,6 +6,23 @@ All endpoints (except `/health`) require API key authentication.
 
 **Header:** `X-API-Key: your_api_key`
 
+## API Key Management
+
+API keys are required for authentication. You can generate a unique API key using:
+
+```
+# Generate UUID API key
+python -c "import uuid; print(uuid.uuid4())"
+```
+
+To use a generated key, insert it into the database:
+
+```sql
+INSERT INTO api_keys (api_key, client_id, is_admin) VALUES ('your-generated-uuid', 'your-client-id', false);
+```
+
+For admin privileges, set `is_admin` to `true`.
+
 ## API Endpoints
 
 ### Health Check
@@ -44,8 +61,14 @@ GET /keyword-groups?client_id=client1
 ```json
 {
   "groups": {
-    "tech": ["python", "ai"],
-    "webdev": ["fastapi", "react"]
+    "tech": {
+      "keywords": ["python", "ai"],
+      "subreddit": "programming"
+    },
+    "webdev": {
+      "keywords": ["fastapi", "react"],
+      "subreddit": null
+    }
   }
 }
 ```
@@ -64,9 +87,12 @@ POST /keyword-groups
 {
   "client_id": "client1",
   "group_id": "finance",
-  "keywords": ["bitcoin", "crypto", "blockchain"]
+  "keywords": ["bitcoin", "crypto", "blockchain"],
+  "subreddit": "Bitcoin"
 }
 ```
+
+The `subreddit` field is optional. If provided, keywords will only be monitored in that specific subreddit. If omitted or set to `null`, keywords will be monitored across all subreddits.
 
 ##### Response
 
@@ -90,7 +116,8 @@ PUT /keyword-groups
 {
   "client_id": "client1",
   "group_id": "tech",
-  "keywords": ["python", "ai", "machine learning"]
+  "keywords": ["python", "ai", "machine learning"],
+  "subreddit": "programming"
 }
 ```
 
@@ -200,7 +227,8 @@ GET /matches?client_id=client1&group_id=tech&limit=10
     "comment_body": "I've been learning Python for the past month and it's amazing!",
     "permalink": "https://reddit.com/r/programming/comments/abc123/comment/def456",
     "subreddit": "programming",
-    "timestamp": "2023-09-01T15:30:45"
+    "timestamp": "2023-09-01T15:30:45",
+    "content_type": "comment"
   },
   ...
 ]
@@ -210,7 +238,7 @@ GET /matches?client_id=client1&group_id=tech&limit=10
 
 #### Start Streaming
 
-Manually start the Reddit comment streaming process.
+Manually start the Reddit streaming process for comments and submissions.
 
 ```
 POST /start-streaming
@@ -220,7 +248,32 @@ POST /start-streaming
 
 ```json
 {
-  "message": "Reddit comment streaming started"
+  "message": "Reddit streaming started"
+}
+```
+
+#### Get Active Streams
+
+Get information about currently active stream tasks.
+
+```
+GET /active-streams
+```
+
+##### Response
+
+```json
+{
+  "active_streams": {
+    "all": {
+      "active": true,
+      "status": ["running", "running"]
+    },
+    "programming": {
+      "active": true,
+      "status": ["running", "running"]
+    }
+  }
 }
 ```
 
