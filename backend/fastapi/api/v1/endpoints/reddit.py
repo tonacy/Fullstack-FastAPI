@@ -217,11 +217,14 @@ async def save_match(match_data):
         return
     
     try:
+        # Truncate content_text to 200 characters
+        truncated_content = match_data["content_text"][:200]
+        
         cursor.execute("""
             INSERT INTO matches (client_id, group_id, keyword, content_text, permalink, subreddit, timestamp, content_type)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """, (
-            match_data["client_id"], match_data["group_id"], match_data["keyword"], match_data["content_text"],
+            match_data["client_id"], match_data["group_id"], match_data["keyword"], truncated_content,
             match_data["permalink"], match_data["subreddit"], match_data["timestamp"], match_data["content_type"]
         ))
         conn.commit()
@@ -241,7 +244,7 @@ async def call_webhook(client_id, match_data):
             "client_id": match_data["client_id"],
             "group_id": match_data["group_id"],
             "keyword": match_data["keyword"],
-            "content_text": match_data["content_text"],
+            "content_text": match_data["content_text"][:200],  # Truncate to 200 characters
             "permalink": match_data["permalink"],
             "subreddit": match_data["subreddit"],
             "timestamp": match_data["timestamp"],
@@ -294,7 +297,8 @@ async def check_content_for_keywords(content_text, content_type, permalink, subr
                     await save_match(match_data)
                     # Call webhook if client has one configured
                     await call_webhook(client_id, match_data)
-                    logger.info(f"MATCH: {client_id}/{group_id}: {keyword} - {content_type} - r/{subreddit_name} - {content_text[:100]}...")
+                    # Truncate content for logs
+                    logger.info(f"MATCH: {client_id}/{group_id}: {keyword} - {content_type} - r/{subreddit_name} - {content_text[:50]}...")
                     
     return False
 
@@ -532,7 +536,8 @@ async def get_matches(
                         (client_id, limit))
         matches = cursor.fetchall()
         return [{"id": m[0], "client_id": m[1], "group_id": m[2], "keyword": m[3], 
-                "comment_body": m[4], "permalink": m[5], "subreddit": m[6], "timestamp": m[7]} for m in matches]
+                "comment_body": m[4][:200] if m[4] else "", "permalink": m[5], "subreddit": m[6], 
+                "timestamp": m[7], "content_type": m[8] if len(m) > 8 else "comment"} for m in matches]
     except Exception as e:
         logger.error(f"Database error in get_matches: {e}")
         raise HTTPException(status_code=500, detail="Database error")
