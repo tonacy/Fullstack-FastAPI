@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, FastAPI, Header, Security
 from fastapi.security.api_key import APIKeyHeader, APIKey
 from pydantic import BaseModel, HttpUrl
 import psycopg2
+from psycopg2 import pool
 from psycopg2.extras import Json
 from datetime import datetime
 from contextlib import asynccontextmanager
@@ -45,69 +46,93 @@ client_keywords = {}  # Will be loaded from database at startup
 # Track active subreddit streams
 active_streams = {}  # {"subreddit_name": {"task": asyncio.Task, "clients": set(), "count": 0}}
 
-# Database setup
+# Database connection pool setup
 DATABASE_URL = os.getenv("DATABASE_URL")
-conn = None
-cursor = None
+db_pool = None
 
-try:
-    if DATABASE_URL:
-        conn = psycopg2.connect(DATABASE_URL)
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS matches (
-                id SERIAL PRIMARY KEY,
-                client_id TEXT,
-                group_id TEXT,
-                keyword TEXT,
-                content_text TEXT,
-                permalink TEXT,
-                subreddit TEXT,
-                timestamp TEXT,
-                content_type TEXT DEFAULT 'comment'
-            )
-        """)
+# Initialize connection pool
+if DATABASE_URL:
+    try:
+        # Create connection pool with min=2, max=10 connections
+        db_pool = pool.ThreadedConnectionPool(minconn=2, maxconn=10, dsn=DATABASE_URL)
+        logger.info("Database connection pool initialized successfully")
         
-        # Ensure the keys table exists (if it doesn't already)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS api_keys (
-                id SERIAL PRIMARY KEY,
-                api_key TEXT UNIQUE NOT NULL,
-                client_id TEXT NOT NULL,
-                is_admin BOOLEAN NOT NULL DEFAULT false
-            )
-        """)
-        
-        # Create table for client keywords and groups
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS client_keywords (
-                id SERIAL PRIMARY KEY,
-                client_id TEXT NOT NULL,
-                group_id TEXT NOT NULL,
-                keywords JSONB NOT NULL,
-                subreddit TEXT,
-                UNIQUE(client_id, group_id)
-            )
-        """)
-        
-        # Create table for client webhooks
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS client_webhooks (
-                id SERIAL PRIMARY KEY,
-                client_id TEXT UNIQUE NOT NULL,
-                webhook_url TEXT NOT NULL
-            )
-        """)
-        conn.commit()
-        logger.info("Connected to database successfully")
-    else:
-        logger.warning("DATABASE_URL not set. Database features will not be available.")
-except Exception as e:
-    logger.error(f"Database connection error: {e}")
+        # Initialize database schema
+        conn = db_pool.getconn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS matches (
+                    id SERIAL PRIMARY KEY,
+                    client_id TEXT,
+                    group_id TEXT,
+                    keyword TEXT,
+                    content_text TEXT,
+                    permalink TEXT,
+                    subreddit TEXT,
+                    timestamp TEXT,
+                    content_type TEXT DEFAULT 'comment'
+                )
+            """)
+            
+            # Ensure the keys table exists (if it doesn't already)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS api_keys (
+                    id SERIAL PRIMARY KEY,
+                    api_key TEXT UNIQUE NOT NULL,
+                    client_id TEXT NOT NULL,
+                    is_admin BOOLEAN NOT NULL DEFAULT false
+                )
+            """)
+            
+            # Create table for client keywords and groups
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS client_keywords (
+                    id SERIAL PRIMARY KEY,
+                    client_id TEXT NOT NULL,
+                    group_id TEXT NOT NULL,
+                    keywords JSONB NOT NULL,
+                    subreddit TEXT,
+                    UNIQUE(client_id, group_id)
+                )
+            """)
+            
+            # Create table for client webhooks
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS client_webhooks (
+                    id SERIAL PRIMARY KEY,
+                    client_id TEXT UNIQUE NOT NULL,
+                    webhook_url TEXT NOT NULL
+                )
+            """)
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Error initializing database schema: {e}")
+        finally:
+            # Return connection to pool
+            cursor.close()
+            db_pool.putconn(conn)
+    except Exception as e:
+        logger.error(f"Failed to initialize database connection pool: {e}")
+        db_pool = None
+else:
+    logger.warning("DATABASE_URL not set. Database features will not be available.")
 
 # For testing - track number of matches
 match_count = 0
 MAX_TEST_MATCHES = 100
+
+# Helper function to get a connection from the pool
+def get_db_connection():
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+    return db_pool.getconn()
+
+# Helper function to return a connection to the pool
+def release_db_connection(conn):
+    if conn and db_pool:
+        db_pool.putconn(conn)
 
 # Models for keyword operations
 class KeywordGroupUpdate(BaseModel):
@@ -146,10 +171,13 @@ async def validate_api_key(api_key_header: str = Security(api_key_header)) -> Tu
             headers={"WWW-Authenticate": "API-Key"},
         )
     
-    if not conn or not cursor:
+    if not db_pool:
         raise HTTPException(status_code=503, detail="Database not available")
     
+    conn = None
     try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
         cursor.execute("SELECT api_key, client_id FROM api_keys WHERE api_key = %s", (api_key_header,))
         result = cursor.fetchone()
         
@@ -164,14 +192,20 @@ async def validate_api_key(api_key_header: str = Security(api_key_header)) -> Tu
     except Exception as e:
         logger.error(f"Database error in validate_api_key: {e}")
         raise HTTPException(status_code=500, detail="Database error")
+    finally:
+        if conn:
+            release_db_connection(conn)
 
 async def validate_admin(auth: Tuple[str, str] = Depends(validate_api_key)):
     api_key, client_id = auth
     
-    if not conn or not cursor:
+    if not db_pool:
         raise HTTPException(status_code=503, detail="Database not available")
     
+    conn = None
     try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
         cursor.execute("SELECT is_admin FROM api_keys WHERE api_key = %s", (api_key,))
         result = cursor.fetchone()
         
@@ -186,6 +220,9 @@ async def validate_admin(auth: Tuple[str, str] = Depends(validate_api_key)):
     except Exception as e:
         logger.error(f"Database error in validate_admin: {e}")
         raise HTTPException(status_code=500, detail="Database error")
+    finally:
+        if conn:
+            release_db_connection(conn)
 
 async def initialize_reddit():
     """Initialize Reddit API client if credentials are available."""
@@ -212,14 +249,17 @@ async def initialize_reddit():
 
 async def save_match(match_data):
     """Save a match to the database."""
-    if not conn or not cursor:
+    if not db_pool:
         logger.warning("Database not available, match not saved")
         return
     
+    conn = None
     try:
         # Truncate content_text to 200 characters
         truncated_content = match_data["content_text"][:200]
         
+        conn = get_db_connection()
+        cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO matches (client_id, group_id, keyword, content_text, permalink, subreddit, timestamp, content_type)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
@@ -230,8 +270,12 @@ async def save_match(match_data):
         conn.commit()
         logger.info(f"Match saved to database: {match_data['client_id']}/{match_data['group_id']} - {match_data['keyword']} ({match_data['content_type']})")
     except Exception as e:
-        conn.rollback()  # Add rollback to reset transaction state
+        if conn:
+            conn.rollback()  # Add rollback to reset transaction state
         logger.error(f"Error saving match to database: {e}")
+    finally:
+        if conn:
+            release_db_connection(conn)
 
 async def call_webhook(client_id, match_data):
     """Call the client's webhook URL with match data if configured."""
@@ -524,10 +568,14 @@ async def get_matches(
         # Here you could add admin check logic if needed
         raise HTTPException(status_code=403, detail="Not authorized to access this client's data")
     
-    if not conn or not cursor:
+    if not db_pool:
         raise HTTPException(status_code=503, detail="Database not available")
     
+    conn = None
     try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
         if group_id:
             cursor.execute("SELECT * FROM matches WHERE client_id = %s AND group_id = %s ORDER BY id DESC LIMIT %s", 
                         (client_id, group_id, limit))
@@ -541,6 +589,9 @@ async def get_matches(
     except Exception as e:
         logger.error(f"Database error in get_matches: {e}")
         raise HTTPException(status_code=500, detail="Database error")
+    finally:
+        if conn:
+            release_db_connection(conn)
 
 @router.get("/keyword-groups")
 async def get_keyword_groups(
@@ -577,9 +628,10 @@ async def create_keyword_group(
         # Here you could add admin check logic if needed
         raise HTTPException(status_code=403, detail="Not authorized to modify this client's data")
     
-    if not conn or not cursor:
+    if not db_pool:
         raise HTTPException(status_code=503, detail="Database not available")
         
+    conn = None
     try:
         # First update the in-memory representation
         if client_id not in client_keywords:
@@ -597,6 +649,8 @@ async def create_keyword_group(
         }
         
         # Store in database
+        conn = get_db_connection()
+        cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO client_keywords (client_id, group_id, keywords, subreddit) VALUES (%s, %s, %s, %s)",
             (client_id, group.group_id, Json(group.keywords), group.subreddit)
@@ -608,9 +662,13 @@ async def create_keyword_group(
         
         return {"message": f"Keyword group '{group.group_id}' created for {client_id}"}
     except Exception as e:
-        conn.rollback()  # Ensure transaction is rolled back
+        if conn:
+            conn.rollback()  # Ensure transaction is rolled back
         logger.error(f"Error creating keyword group: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create keyword group: {str(e)}")
+    finally:
+        if conn:
+            release_db_connection(conn)
 
 @router.put("/keyword-groups")
 async def update_keyword_group(
@@ -628,9 +686,10 @@ async def update_keyword_group(
         # Here you could add admin check logic if needed
         raise HTTPException(status_code=403, detail="Not authorized to modify this client's data")
     
-    if not conn or not cursor:
+    if not db_pool:
         raise HTTPException(status_code=503, detail="Database not available")
     
+    conn = None
     try:
         # First check if client and group exist in memory
         if client_id not in client_keywords:
@@ -646,6 +705,8 @@ async def update_keyword_group(
         }
         
         # Update in database
+        conn = get_db_connection()
+        cursor = conn.cursor()
         cursor.execute(
             "UPDATE client_keywords SET keywords = %s, subreddit = %s WHERE client_id = %s AND group_id = %s",
             (Json(update.keywords), update.subreddit, client_id, update.group_id)
@@ -665,9 +726,13 @@ async def update_keyword_group(
         
         return {"message": f"Keywords updated for {client_id}/{update.group_id}"}
     except Exception as e:
-        conn.rollback()  # Ensure transaction is rolled back
+        if conn:
+            conn.rollback()  # Ensure transaction is rolled back
         logger.error(f"Error updating keyword group: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to update keyword group: {str(e)}")
+    finally:
+        if conn:
+            release_db_connection(conn)
 
 @router.delete("/keyword-groups")
 async def delete_keyword_group(
@@ -685,9 +750,10 @@ async def delete_keyword_group(
         # Here you could add admin check logic if needed
         raise HTTPException(status_code=403, detail="Not authorized to modify this client's data")
     
-    if not conn or not cursor:
+    if not db_pool:
         raise HTTPException(status_code=503, detail="Database not available")
     
+    conn = None
     try:
         # First check if client and group exist in memory
         if client_id not in client_keywords:
@@ -700,6 +766,8 @@ async def delete_keyword_group(
         del client_keywords[client_id]["groups"][delete.group_id]
         
         # Delete from database
+        conn = get_db_connection()
+        cursor = conn.cursor()
         cursor.execute(
             "DELETE FROM client_keywords WHERE client_id = %s AND group_id = %s",
             (client_id, delete.group_id)
@@ -711,9 +779,13 @@ async def delete_keyword_group(
         
         return {"message": f"Keyword group '{delete.group_id}' deleted for {client_id}"}
     except Exception as e:
-        conn.rollback()  # Ensure transaction is rolled back
+        if conn:
+            conn.rollback()  # Ensure transaction is rolled back
         logger.error(f"Error deleting keyword group: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to delete keyword group: {str(e)}")
+    finally:
+        if conn:
+            release_db_connection(conn)
 
 @router.post("/webhook")
 async def set_webhook(
@@ -731,9 +803,10 @@ async def set_webhook(
         # Here you could add admin check logic if needed
         raise HTTPException(status_code=403, detail="Not authorized to modify this client's webhook")
     
-    if not conn or not cursor:
+    if not db_pool:
         raise HTTPException(status_code=503, detail="Database not available")
     
+    conn = None
     try:
         # Update in-memory representation
         if client_id not in client_keywords:
@@ -742,6 +815,8 @@ async def set_webhook(
         client_keywords[client_id]["webhook_url"] = str(webhook.webhook_url)
         
         # Update in database
+        conn = get_db_connection()
+        cursor = conn.cursor()
         cursor.execute(
             "SELECT id FROM client_webhooks WHERE client_id = %s",
             (client_id,)
@@ -763,9 +838,13 @@ async def set_webhook(
         
         return {"message": f"Webhook URL updated for {client_id}"}
     except Exception as e:
-        conn.rollback()
+        if conn:
+            conn.rollback()
         logger.error(f"Error updating webhook: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to update webhook: {str(e)}")
+    finally:
+        if conn:
+            release_db_connection(conn)
 
 @router.delete("/webhook")
 async def delete_webhook(
@@ -783,9 +862,10 @@ async def delete_webhook(
         # Here you could add admin check logic if needed
         raise HTTPException(status_code=403, detail="Not authorized to modify this client's webhook")
     
-    if not conn or not cursor:
+    if not db_pool:
         raise HTTPException(status_code=503, detail="Database not available")
     
+    conn = None
     try:
         # Check if client exists in memory
         if client_id not in client_keywords:
@@ -799,6 +879,8 @@ async def delete_webhook(
         del client_keywords[client_id]["webhook_url"]
         
         # Remove from database
+        conn = get_db_connection()
+        cursor = conn.cursor()
         cursor.execute(
             "DELETE FROM client_webhooks WHERE client_id = %s",
             (client_id,)
@@ -807,9 +889,13 @@ async def delete_webhook(
         
         return {"message": f"Webhook URL removed for {client_id}"}
     except Exception as e:
-        conn.rollback()
+        if conn:
+            conn.rollback()
         logger.error(f"Error deleting webhook: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to delete webhook: {str(e)}")
+    finally:
+        if conn:
+            release_db_connection(conn)
 
 @router.post("/start-streaming")
 async def start_streaming_endpoint(
@@ -860,11 +946,15 @@ async def load_keywords_from_db():
     """Load client keywords and webhooks from database."""
     global client_keywords
     
-    if not conn or not cursor:
+    if not db_pool:
         logger.warning("Database not available, using default empty keywords")
         return
-        
+    
+    conn = None
     try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
         # Load all client keywords
         cursor.execute("SELECT client_id, group_id, keywords, subreddit FROM client_keywords")
         keyword_rows = cursor.fetchall()
@@ -893,7 +983,8 @@ async def load_keywords_from_db():
             
         logger.info(f"Loaded keywords for {len(client_keywords)} clients from database")
     except Exception as e:
-        conn.rollback()  # Ensure transaction is rolled back
+        if conn:
+            conn.rollback()  # Ensure transaction is rolled back
         logger.error(f"Error loading keywords from database: {e}")
         # Load default keywords as fallback
         client_keywords = {
@@ -914,4 +1005,7 @@ async def load_keywords_from_db():
                 }
             }
         }
-        logger.info("Using default keywords from environment variable") 
+        logger.info("Using default keywords from environment variable")
+    finally:
+        if conn:
+            release_db_connection(conn) 
