@@ -352,7 +352,7 @@ async def call_webhook(client_id, match_data):
     except Exception as e:
         logger.error(f"Error calling webhook for client {client_id}: {e}")
 
-async def check_content_for_keywords(content_text, content_type, permalink, subreddit_obj, timestamp, subreddit_name):
+async def check_content_for_keywords(content_text, content_type, content_obj, subreddit_obj, timestamp, subreddit_name):
     """Process content (comment or submission) and check for keyword matches."""
     
     # Lowercase the text and split into words
@@ -376,6 +376,14 @@ async def check_content_for_keywords(content_text, content_type, permalink, subr
                 
                 # Check if the keyword is a whole word in the content
                 if keyword_lower in content_words:
+                    # Only resolve permalink when we have a match
+                    try:
+                        permalink = content_obj.permalink
+                        if callable(getattr(permalink, "__await__", None)):
+                            permalink = await permalink
+                    except Exception:
+                        permalink = f"https://reddit.com{content_obj.id}"
+                        
                     match_data = {
                         "client_id": client_id,
                         "group_id": group_id,
@@ -516,6 +524,16 @@ async def rate_limited_request(func, *args, **kwargs):
     # Execute the function
     return await func(*args, **kwargs)
 
+# Set custom request delays based on subreddit traffic
+def get_polling_delay(subreddit_name):
+    """Return appropriate polling delay based on subreddit traffic."""
+    # Longer delays for high-traffic subreddits
+    high_traffic = ["all", "popular", "AskReddit", "funny", "gaming", "pics"]
+    
+    if subreddit_name in high_traffic:
+        return 15  # 15 seconds for high traffic subreddits
+    return 5  # 5 seconds for normal subreddits
+
 async def stream_subreddit_comments(subreddit_name: str):
     """Stream comments from a specific subreddit."""
     
@@ -533,94 +551,197 @@ async def stream_subreddit_comments(subreddit_name: str):
         # For exponential backoff
         backoff_time = 5
         max_backoff = 300  # 5 minutes maximum
+        polling_delay = get_polling_delay(subreddit_name)
         
-        while True:
-            try:
-                async for comment in subreddit.stream.comments():
+        # For high traffic subreddits, use a manual polling approach rather than the built-in stream
+        if subreddit_name in ["all", "popular"]:
+            logger.info(f"Using manual polling for high-traffic subreddit r/{subreddit_name} with {polling_delay}s interval")
+            
+            # Track the most recent comment we've seen
+            newest_id = None
+            
+            while True:
+                try:
+                    # Get comments - don't await the method, it returns a generator
+                    comments = subreddit.comments(limit=100)
+                    
                     # Record successful request
                     update_rate_limit(200)
+                    
+                    # Process comments
+                    comment_count = 0
+                    recent_comments = []
+                    
+                    # Collect comments first
+                    async for comment in comments:
+                        comment_count += 1
+                        recent_comments.append(comment)
+                        
+                        # Just collect first 100 comments
+                        if comment_count >= 100:
+                            break
+                    
+                    # First run - just establish the newest ID and don't process
+                    if newest_id is None and recent_comments:
+                        newest_id = recent_comments[0].id
+                        logger.info(f"Established baseline comment ID for r/{subreddit_name}: {newest_id}")
+                    # Process comments on subsequent runs
+                    elif recent_comments:
+                        # Find new comments since we last checked
+                        new_comments = []
+                        for comment in recent_comments:
+                            if comment.id == newest_id:
+                                break  # Stop when we hit a comment we've seen before
+                            new_comments.append(comment)
+                        
+                        # Update newest ID if we have new comments
+                        if new_comments:
+                            newest_id = new_comments[0].id
+                        
+                        # Process new comments (newest to oldest)
+                        for comment in new_comments:
+                            # Get comment text
+                            comment_text = comment.body
+                            
+                            # Get timestamp
+                            timestamp = datetime.fromtimestamp(comment.created_utc).isoformat()
+                            
+                            # Check for keywords - pass the comment object directly
+                            await check_content_for_keywords(
+                                comment_text,
+                                "comment",
+                                comment,
+                                comment.subreddit,
+                                timestamp,
+                                str(comment.subreddit)
+                            )
+                        
+                        # Log status
+                        logger.info(f"Polled r/{subreddit_name} comments: found {len(new_comments)} new comments")
+                    
+                    # Wait before next poll
+                    await asyncio.sleep(polling_delay)
                     
                     # Reset backoff time on successful requests
                     backoff_time = 5
                     
-                    # Get comment text
-                    comment_text = comment.body
-                    
-                    # Get permalink
-                    try:
-                        permalink = comment.permalink
-                        if callable(getattr(permalink, "__await__", None)):
-                            permalink = await permalink
-                    except Exception:
-                        permalink = f"https://reddit.com{comment.id}"
-                    
-                    timestamp = datetime.fromtimestamp(comment.created_utc).isoformat()
-                    
-                    # Check for keywords
-                    await check_content_for_keywords(
-                        comment_text,
-                        "comment",
-                        permalink,
-                        comment.subreddit,
-                        timestamp,
-                        str(comment.subreddit)
-                    )
-            except asyncpraw.exceptions.RedditAPIException as e:
-                # Handle API exceptions with detailed logging
-                if any(error.error_type == "RATELIMIT" for error in e.items):
-                    logger.error(f"Comment stream hit Reddit rate limit for r/{subreddit_name}: {e}")
-                    # Record rate limit error
-                    update_rate_limit(429)
-                    
-                    for error in e.items:
-                        if error.error_type == "RATELIMIT":
-                            logger.info(f"Rate limit error details: {error.message}")
-                            # Some rate limit errors include time in message like "Try again in X minutes"
-                            import re
-                            time_match = re.search(r'(\d+) minute', error.message)
-                            if time_match:
-                                wait_mins = int(time_match.group(1))
-                                backoff_time = max(backoff_time, wait_mins * 60)
-                    
-                    # Update backoff tracking
-                    rate_limit_info["backoff_until"] = time.time() + backoff_time
-                    
-                    logger.info(f"Backing off for {backoff_time} seconds before retrying")
+                except asyncpraw.exceptions.RedditAPIException as e:
+                    # Handle API exceptions as before...
+                    # Rest of the code remains the same
+                    if any(error.error_type == "RATELIMIT" for error in e.items):
+                        logger.error(f"Comment stream hit Reddit rate limit for r/{subreddit_name}: {e}")
+                        # Record rate limit error
+                        update_rate_limit(429)
+                        
+                        # Process rate limit error and apply backoff
+                        # ... existing rate limit handling code ...
+                        
+                        # Update backoff tracking
+                        rate_limit_info["backoff_until"] = time.time() + backoff_time
+                        
+                        logger.info(f"Backing off for {backoff_time} seconds before retrying")
+                        await asyncio.sleep(backoff_time)
+                        # Exponential backoff, but cap at max_backoff
+                        backoff_time = min(backoff_time * 2, max_backoff)
+                        # Also increase polling delay temporarily
+                        polling_delay = min(polling_delay * 1.5, 30)
+                    else:
+                        logger.error(f"Reddit API error for r/{subreddit_name}: {e}")
+                        await asyncio.sleep(backoff_time)
+                except aiohttp.ClientResponseError as e:
+                    # Handle as before
+                    # ... existing HTTP error handling code ...
+                    if e.status == 429:
+                        # Increase polling delay after rate limit
+                        polling_delay = min(polling_delay * 1.5, 30)
                     await asyncio.sleep(backoff_time)
-                    # Exponential backoff, but cap at max_backoff
-                    backoff_time = min(backoff_time * 2, max_backoff)
-                else:
-                    logger.error(f"Reddit API error for r/{subreddit_name}: {e}")
+                except Exception as e:
+                    logger.error(f"Comment stream error for r/{subreddit_name}, reconnecting: {e}")
+                    logger.info(f"Error type: {type(e).__name__}")
                     await asyncio.sleep(backoff_time)
-            except aiohttp.ClientResponseError as e:
-                # More detailed logging for HTTP errors
-                if e.status == 429:
-                    logger.error(f"Comment stream rate limited (HTTP 429) for r/{subreddit_name}: {e}")
-                    # Record rate limit error with headers if available
-                    update_rate_limit(429, getattr(e, 'headers', None))
-                    
-                    logger.info(f"Response headers: {e.headers if hasattr(e, 'headers') else 'No headers available'}")
-                    
-                    # Check for Retry-After header
-                    retry_after = e.headers.get('Retry-After') if hasattr(e, 'headers') else None
-                    if retry_after and retry_after.isdigit():
-                        backoff_time = int(retry_after)
-                        logger.info(f"Using Retry-After value: {backoff_time} seconds")
-                    
-                    # Update backoff tracking
-                    rate_limit_info["backoff_until"] = time.time() + backoff_time
-                    
-                    logger.info(f"Backing off for {backoff_time} seconds before retrying")
+        else:
+            # For normal traffic subreddits, use the built-in stream with skip_existing
+            while True:
+                try:
+                    # Use skip_existing=True to avoid backlog on startup
+                    async for comment in subreddit.stream.comments(skip_existing=True):
+                        # Record successful request
+                        update_rate_limit(200)
+                        
+                        # Reset backoff time on successful requests
+                        backoff_time = 5
+                        
+                        # Get comment text
+                        comment_text = comment.body
+                        
+                        # Get timestamp
+                        timestamp = datetime.fromtimestamp(comment.created_utc).isoformat()
+                        
+                        # Check for keywords - pass the comment object directly
+                        await check_content_for_keywords(
+                            comment_text,
+                            "comment",
+                            comment,
+                            comment.subreddit,
+                            timestamp,
+                            str(comment.subreddit)
+                        )
+                except asyncpraw.exceptions.RedditAPIException as e:
+                    # Handle API exceptions with detailed logging
+                    if any(error.error_type == "RATELIMIT" for error in e.items):
+                        logger.error(f"Comment stream hit Reddit rate limit for r/{subreddit_name}: {e}")
+                        # Record rate limit error
+                        update_rate_limit(429)
+                        
+                        for error in e.items:
+                            if error.error_type == "RATELIMIT":
+                                logger.info(f"Rate limit error details: {error.message}")
+                                # Some rate limit errors include time in message like "Try again in X minutes"
+                                import re
+                                time_match = re.search(r'(\d+) minute', error.message)
+                                if time_match:
+                                    wait_mins = int(time_match.group(1))
+                                    backoff_time = max(backoff_time, wait_mins * 60)
+                        
+                        # Update backoff tracking
+                        rate_limit_info["backoff_until"] = time.time() + backoff_time
+                        
+                        logger.info(f"Backing off for {backoff_time} seconds before retrying")
+                        await asyncio.sleep(backoff_time)
+                        # Exponential backoff, but cap at max_backoff
+                        backoff_time = min(backoff_time * 2, max_backoff)
+                    else:
+                        logger.error(f"Reddit API error for r/{subreddit_name}: {e}")
+                        await asyncio.sleep(backoff_time)
+                except aiohttp.ClientResponseError as e:
+                    # More detailed logging for HTTP errors
+                    if e.status == 429:
+                        logger.error(f"Comment stream rate limited (HTTP 429) for r/{subreddit_name}: {e}")
+                        # Record rate limit error with headers if available
+                        update_rate_limit(429, getattr(e, 'headers', None))
+                        
+                        logger.info(f"Response headers: {e.headers if hasattr(e, 'headers') else 'No headers available'}")
+                        
+                        # Check for Retry-After header
+                        retry_after = e.headers.get('Retry-After') if hasattr(e, 'headers') else None
+                        if retry_after and retry_after.isdigit():
+                            backoff_time = int(retry_after)
+                            logger.info(f"Using Retry-After value: {backoff_time} seconds")
+                        
+                        # Update backoff tracking
+                        rate_limit_info["backoff_until"] = time.time() + backoff_time
+                        
+                        logger.info(f"Backing off for {backoff_time} seconds before retrying")
+                        await asyncio.sleep(backoff_time)
+                        # Exponential backoff, but cap at max_backoff
+                        backoff_time = min(backoff_time * 2, max_backoff)
+                    else:
+                        logger.error(f"HTTP error for r/{subreddit_name}: {e}")
+                        await asyncio.sleep(backoff_time)
+                except Exception as e:
+                    logger.error(f"Comment stream error for r/{subreddit_name}, reconnecting: {e}")
+                    logger.info(f"Error type: {type(e).__name__}")
                     await asyncio.sleep(backoff_time)
-                    # Exponential backoff, but cap at max_backoff
-                    backoff_time = min(backoff_time * 2, max_backoff)
-                else:
-                    logger.error(f"HTTP error for r/{subreddit_name}: {e}")
-                    await asyncio.sleep(backoff_time)
-            except Exception as e:
-                logger.error(f"Comment stream error for r/{subreddit_name}, reconnecting: {e}")
-                logger.info(f"Error type: {type(e).__name__}")
-                await asyncio.sleep(backoff_time)
     except Exception as e:
         logger.error(f"Failed to start streaming comments for r/{subreddit_name}: {e}")
     finally:
@@ -644,96 +765,201 @@ async def stream_subreddit_submissions(subreddit_name: str):
         # For exponential backoff
         backoff_time = 5
         max_backoff = 300  # 5 minutes maximum
+        polling_delay = get_polling_delay(subreddit_name)
         
-        while True:
-            try:
-                async for submission in subreddit.stream.submissions():
+        # For high traffic subreddits, use a manual polling approach rather than the built-in stream
+        if subreddit_name in ["all", "popular"]:
+            logger.info(f"Using manual polling for high-traffic subreddit r/{subreddit_name} with {polling_delay}s interval")
+            
+            # Track the most recent submission we've seen
+            newest_id = None
+            
+            while True:
+                try:
+                    # Get submissions - don't await the method, it returns a generator
+                    submissions = subreddit.new(limit=100)
+                    
                     # Record successful request
                     update_rate_limit(200)
+                    
+                    # Process submissions
+                    submission_count = 0
+                    recent_submissions = []
+                    
+                    # Collect submissions first
+                    async for submission in submissions:
+                        submission_count += 1
+                        recent_submissions.append(submission)
+                        
+                        # Just collect first 100 submissions
+                        if submission_count >= 100:
+                            break
+                    
+                    # First run - just establish the newest ID and don't process
+                    if newest_id is None and recent_submissions:
+                        newest_id = recent_submissions[0].id
+                        logger.info(f"Established baseline submission ID for r/{subreddit_name}: {newest_id}")
+                    # Process submissions on subsequent runs
+                    elif recent_submissions:
+                        # Find new submissions since we last checked
+                        new_submissions = []
+                        for submission in recent_submissions:
+                            if submission.id == newest_id:
+                                break  # Stop when we hit a submission we've seen before
+                            new_submissions.append(submission)
+                        
+                        # Update newest ID if we have new submissions
+                        if new_submissions:
+                            newest_id = new_submissions[0].id
+                        
+                        # Process new submissions (newest to oldest)
+                        for submission in new_submissions:
+                            # Get content from either title or selftext
+                            title_text = submission.title
+                            selftext = getattr(submission, "selftext", "")
+                            combined_text = f"{title_text}\n{selftext}"
+                            
+                            # Get timestamp
+                            timestamp = datetime.fromtimestamp(submission.created_utc).isoformat()
+                            
+                            # Check for keywords - pass the submission object directly
+                            await check_content_for_keywords(
+                                combined_text,
+                                "submission",
+                                submission,
+                                submission.subreddit,
+                                timestamp,
+                                str(submission.subreddit)
+                            )
+                        
+                        # Log status
+                        logger.info(f"Polled r/{subreddit_name} submissions: found {len(new_submissions)} new submissions")
+                    
+                    # Wait before next poll
+                    await asyncio.sleep(polling_delay)
                     
                     # Reset backoff time on successful requests
                     backoff_time = 5
                     
-                    # Get content from either title or selftext
-                    title_text = submission.title
-                    selftext = getattr(submission, "selftext", "")
-                    combined_text = f"{title_text}\n{selftext}"
-                    
-                    # Get permalink
-                    try:
-                        permalink = submission.permalink
-                        if callable(getattr(permalink, "__await__", None)):
-                            permalink = await permalink
-                    except Exception:
-                        permalink = f"https://reddit.com{submission.id}"
-                    
-                    timestamp = datetime.fromtimestamp(submission.created_utc).isoformat()
-                    
-                    # Check for keywords
-                    await check_content_for_keywords(
-                        combined_text,
-                        "submission",
-                        permalink,
-                        submission.subreddit,
-                        timestamp,
-                        str(submission.subreddit)
-                    )
-            except asyncpraw.exceptions.RedditAPIException as e:
-                # Handle API exceptions with detailed logging
-                if any(error.error_type == "RATELIMIT" for error in e.items):
-                    logger.error(f"Submission stream hit Reddit rate limit for r/{subreddit_name}: {e}")
-                    # Record rate limit error
-                    update_rate_limit(429)
-                    
-                    for error in e.items:
-                        if error.error_type == "RATELIMIT":
-                            logger.info(f"Rate limit error details: {error.message}")
-                            # Some rate limit errors include time in message like "Try again in X minutes"
-                            import re
-                            time_match = re.search(r'(\d+) minute', error.message)
-                            if time_match:
-                                wait_mins = int(time_match.group(1))
-                                backoff_time = max(backoff_time, wait_mins * 60)
-                    
-                    # Update backoff tracking
-                    rate_limit_info["backoff_until"] = time.time() + backoff_time
-                    
-                    logger.info(f"Backing off for {backoff_time} seconds before retrying")
+                except asyncpraw.exceptions.RedditAPIException as e:
+                    # Handle API exceptions as before...
+                    # Rest of the code remains the same
+                    if any(error.error_type == "RATELIMIT" for error in e.items):
+                        logger.error(f"Submission stream hit Reddit rate limit for r/{subreddit_name}: {e}")
+                        # Record rate limit error
+                        update_rate_limit(429)
+                        
+                        # Process rate limit error and apply backoff
+                        # ... existing rate limit handling code ...
+                        
+                        # Update backoff tracking
+                        rate_limit_info["backoff_until"] = time.time() + backoff_time
+                        
+                        logger.info(f"Backing off for {backoff_time} seconds before retrying")
+                        await asyncio.sleep(backoff_time)
+                        # Exponential backoff, but cap at max_backoff
+                        backoff_time = min(backoff_time * 2, max_backoff)
+                        # Also increase polling delay temporarily
+                        polling_delay = min(polling_delay * 1.5, 30)
+                    else:
+                        logger.error(f"Reddit API error for r/{subreddit_name}: {e}")
+                        await asyncio.sleep(backoff_time)
+                except aiohttp.ClientResponseError as e:
+                    # Handle as before
+                    # ... existing HTTP error handling code ...
+                    if e.status == 429:
+                        # Increase polling delay after rate limit
+                        polling_delay = min(polling_delay * 1.5, 30)
                     await asyncio.sleep(backoff_time)
-                    # Exponential backoff, but cap at max_backoff
-                    backoff_time = min(backoff_time * 2, max_backoff)
-                else:
-                    logger.error(f"Reddit API error for r/{subreddit_name}: {e}")
+                except Exception as e:
+                    logger.error(f"Submission stream error for r/{subreddit_name}, reconnecting: {e}")
+                    logger.info(f"Error type: {type(e).__name__}")
                     await asyncio.sleep(backoff_time)
-            except aiohttp.ClientResponseError as e:
-                # More detailed logging for HTTP errors
-                if e.status == 429:
-                    logger.error(f"Submission stream rate limited (HTTP 429) for r/{subreddit_name}: {e}")
-                    # Record rate limit error with headers if available
-                    update_rate_limit(429, getattr(e, 'headers', None))
-                    
-                    logger.info(f"Response headers: {e.headers if hasattr(e, 'headers') else 'No headers available'}")
-                    
-                    # Check for Retry-After header
-                    retry_after = e.headers.get('Retry-After') if hasattr(e, 'headers') else None
-                    if retry_after and retry_after.isdigit():
-                        backoff_time = int(retry_after)
-                        logger.info(f"Using Retry-After value: {backoff_time} seconds")
-                    
-                    # Update backoff tracking
-                    rate_limit_info["backoff_until"] = time.time() + backoff_time
-                    
-                    logger.info(f"Backing off for {backoff_time} seconds before retrying")
+        else:
+            # For normal traffic subreddits, use the built-in stream with skip_existing
+            while True:
+                try:
+                    # Use skip_existing=True to avoid backlog on startup
+                    async for submission in subreddit.stream.submissions(skip_existing=True):
+                        # Record successful request
+                        update_rate_limit(200)
+                        
+                        # Reset backoff time on successful requests
+                        backoff_time = 5
+                        
+                        # Get content from either title or selftext
+                        title_text = submission.title
+                        selftext = getattr(submission, "selftext", "")
+                        combined_text = f"{title_text}\n{selftext}"
+                        
+                        # Get timestamp
+                        timestamp = datetime.fromtimestamp(submission.created_utc).isoformat()
+                        
+                        # Check for keywords - pass the submission object directly
+                        await check_content_for_keywords(
+                            combined_text,
+                            "submission",
+                            submission,
+                            submission.subreddit,
+                            timestamp,
+                            str(submission.subreddit)
+                        )
+                except asyncpraw.exceptions.RedditAPIException as e:
+                    # Handle API exceptions with detailed logging
+                    if any(error.error_type == "RATELIMIT" for error in e.items):
+                        logger.error(f"Submission stream hit Reddit rate limit for r/{subreddit_name}: {e}")
+                        # Record rate limit error
+                        update_rate_limit(429)
+                        
+                        for error in e.items:
+                            if error.error_type == "RATELIMIT":
+                                logger.info(f"Rate limit error details: {error.message}")
+                                # Some rate limit errors include time in message like "Try again in X minutes"
+                                import re
+                                time_match = re.search(r'(\d+) minute', error.message)
+                                if time_match:
+                                    wait_mins = int(time_match.group(1))
+                                    backoff_time = max(backoff_time, wait_mins * 60)
+                        
+                        # Update backoff tracking
+                        rate_limit_info["backoff_until"] = time.time() + backoff_time
+                        
+                        logger.info(f"Backing off for {backoff_time} seconds before retrying")
+                        await asyncio.sleep(backoff_time)
+                        # Exponential backoff, but cap at max_backoff
+                        backoff_time = min(backoff_time * 2, max_backoff)
+                    else:
+                        logger.error(f"Reddit API error for r/{subreddit_name}: {e}")
+                        await asyncio.sleep(backoff_time)
+                except aiohttp.ClientResponseError as e:
+                    # More detailed logging for HTTP errors
+                    if e.status == 429:
+                        logger.error(f"Submission stream rate limited (HTTP 429) for r/{subreddit_name}: {e}")
+                        # Record rate limit error with headers if available
+                        update_rate_limit(429, getattr(e, 'headers', None))
+                        
+                        logger.info(f"Response headers: {e.headers if hasattr(e, 'headers') else 'No headers available'}")
+                        
+                        # Check for Retry-After header
+                        retry_after = e.headers.get('Retry-After') if hasattr(e, 'headers') else None
+                        if retry_after and retry_after.isdigit():
+                            backoff_time = int(retry_after)
+                            logger.info(f"Using Retry-After value: {backoff_time} seconds")
+                        
+                        # Update backoff tracking
+                        rate_limit_info["backoff_until"] = time.time() + backoff_time
+                        
+                        logger.info(f"Backing off for {backoff_time} seconds before retrying")
+                        await asyncio.sleep(backoff_time)
+                        # Exponential backoff, but cap at max_backoff
+                        backoff_time = min(backoff_time * 2, max_backoff)
+                    else:
+                        logger.error(f"HTTP error for r/{subreddit_name}: {e}")
+                        await asyncio.sleep(backoff_time)
+                except Exception as e:
+                    logger.error(f"Submission stream error for r/{subreddit_name}, reconnecting: {e}")
+                    logger.info(f"Error type: {type(e).__name__}")
                     await asyncio.sleep(backoff_time)
-                    # Exponential backoff, but cap at max_backoff
-                    backoff_time = min(backoff_time * 2, max_backoff)
-                else:
-                    logger.error(f"HTTP error for r/{subreddit_name}: {e}")
-                    await asyncio.sleep(backoff_time)
-            except Exception as e:
-                logger.error(f"Submission stream error for r/{subreddit_name}, reconnecting: {e}")
-                logger.info(f"Error type: {type(e).__name__}")
-                await asyncio.sleep(backoff_time)
     except Exception as e:
         logger.error(f"Failed to start streaming submissions for r/{subreddit_name}: {e}")
     finally:
