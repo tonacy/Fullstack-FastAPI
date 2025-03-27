@@ -5,6 +5,7 @@ import asyncio
 import aiohttp
 import logging
 import time
+import sys
 from fastapi import APIRouter, Depends, HTTPException, FastAPI, Header, Security
 from fastapi.security.api_key import APIKeyHeader, APIKey
 from pydantic import BaseModel, HttpUrl
@@ -18,10 +19,35 @@ from typing import Optional, Tuple, Literal, Dict, Set, List
 # Create router
 router = APIRouter()
 
-# Setup logging
-logging.basicConfig(level=logging.INFO, 
-                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# Setup logging to correctly separate INFO and ERROR
+# Create a custom logger
 logger = logging.getLogger("reddit_monitor")
+logger.setLevel(logging.INFO)
+logger.propagate = False  # Prevent duplicate logs
+
+# Create handlers for stdout (INFO, DEBUG) and stderr (WARNING, ERROR, CRITICAL)
+stdout_handler = logging.StreamHandler(sys.stdout)
+stderr_handler = logging.StreamHandler(sys.stderr)
+
+# Set level filters
+stdout_handler.setLevel(logging.DEBUG)
+stderr_handler.setLevel(logging.WARNING)
+
+# Add filters to ensure logs go to the right handler
+class InfoFilter(logging.Filter):
+    def filter(self, record):
+        return record.levelno <= logging.INFO
+
+stdout_handler.addFilter(InfoFilter())
+
+# Create formatter
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+stdout_handler.setFormatter(formatter)
+stderr_handler.setFormatter(formatter)
+
+# Add handlers to logger
+logger.addHandler(stdout_handler)
+logger.addHandler(stderr_handler)
 
 # Rate limit tracking
 rate_limit_info = {
