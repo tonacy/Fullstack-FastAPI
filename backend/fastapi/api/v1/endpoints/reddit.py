@@ -4,6 +4,7 @@ import json
 import asyncio
 import aiohttp
 import logging
+import time
 from fastapi import APIRouter, Depends, HTTPException, FastAPI, Header, Security
 from fastapi.security.api_key import APIKeyHeader, APIKey
 from pydantic import BaseModel, HttpUrl
@@ -21,6 +22,51 @@ router = APIRouter()
 logging.basicConfig(level=logging.INFO, 
                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("reddit_monitor")
+
+# Rate limit tracking
+rate_limit_info = {
+    "last_reset": time.time(),
+    "requests": 0,
+    "errors_429": 0,
+    "backoff_until": 0,
+    "remaining": 100,  # Default assumption
+    "reset_time": 0,
+    "history": []  # Will store (timestamp, status) tuples
+}
+
+def update_rate_limit(status_code=200, headers=None):
+    """Update rate limit tracking information."""
+    now = time.time()
+    
+    # Record this request
+    rate_limit_info["requests"] += 1
+    rate_limit_info["history"].append((now, status_code))
+    
+    # Trim history to last 100 entries
+    if len(rate_limit_info["history"]) > 100:
+        rate_limit_info["history"] = rate_limit_info["history"][-100:]
+    
+    # Update based on headers if provided
+    if headers:
+        if "x-ratelimit-remaining" in headers:
+            try:
+                rate_limit_info["remaining"] = int(headers["x-ratelimit-remaining"])
+            except (ValueError, TypeError):
+                pass
+                
+        if "x-ratelimit-reset" in headers:
+            try:
+                rate_limit_info["reset_time"] = float(headers["x-ratelimit-reset"])
+            except (ValueError, TypeError):
+                pass
+    
+    # Record 429 errors
+    if status_code == 429:
+        rate_limit_info["errors_429"] += 1
+        
+    # Clean old history entries (older than 1 hour)
+    one_hour_ago = now - 3600
+    rate_limit_info["history"] = [(t, s) for t, s in rate_limit_info["history"] if t > one_hour_ago]
 
 # API Key settings
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -235,10 +281,12 @@ async def initialize_reddit():
     
     if reddit is None:
         try:
+            # Create the Reddit client with custom rate limits settings
             reddit = asyncpraw.Reddit(
                 client_id=REDDIT_CLIENT_ID,
                 client_secret=REDDIT_CLIENT_SECRET,
-                user_agent="KeywordMonitor v1.0 by /u/Keywrodeo"
+                user_agent="KeywordMonitor v1.0 by /u/Keywrodeo",
+                ratelimit_seconds=5  # Be conservative with rate limits
             )
             logger.info("Reddit API client initialized successfully")
         except Exception as e:
@@ -425,15 +473,48 @@ async def update_active_streams():
     if None in needed_subreddits:
         needed_subreddits.remove(None)
     
-    # Start streams for new subreddits
+    # Start streams for new subreddits with staggered delays
+    delay = 0
+    delay_step = 2  # Start each stream with a 2-second delay to stagger API calls
     for subreddit in needed_subreddits:
         if subreddit not in active_streams or active_streams[subreddit]["task"] is None:
-            await start_subreddit_stream(subreddit)
+            logger.info(f"Scheduling start of r/{subreddit} stream with {delay}s delay")
+            # Schedule this stream to start after a delay
+            asyncio.create_task(delayed_stream_start(subreddit, delay))
+            delay += delay_step
     
     # Stop streams for unnecessary subreddits
     for subreddit in list(active_streams.keys()):
         if subreddit not in needed_subreddits or subreddit_keyword_counts.get(subreddit, 0) == 0:
             await stop_subreddit_stream(subreddit)
+
+async def delayed_stream_start(subreddit_name: str, delay: float):
+    """Start a subreddit stream after a delay to stagger API requests."""
+    if delay > 0:
+        logger.info(f"Waiting {delay}s before starting r/{subreddit_name} stream")
+        await asyncio.sleep(delay)
+    await start_subreddit_stream(subreddit_name)
+
+# Function to implement rate limiting on Reddit API requests
+async def rate_limited_request(func, *args, **kwargs):
+    """Execute a Reddit API request with rate limiting."""
+    now = time.time()
+    
+    # Check if we're in backoff
+    if now < rate_limit_info["backoff_until"]:
+        wait_time = rate_limit_info["backoff_until"] - now
+        logger.info(f"In backoff period, waiting {wait_time:.1f}s before making request")
+        await asyncio.sleep(wait_time)
+    
+    # If we've made too many requests recently, add a small delay
+    recent_requests = len([t for t, _ in rate_limit_info["history"] if t > now - 60])
+    if recent_requests > 30:  # More than 30 requests in the last minute
+        delay = 2.0  # Add a 2 second delay
+        logger.info(f"High request rate detected ({recent_requests} in last minute), adding {delay}s delay")
+        await asyncio.sleep(delay)
+    
+    # Execute the function
+    return await func(*args, **kwargs)
 
 async def stream_subreddit_comments(subreddit_name: str):
     """Stream comments from a specific subreddit."""
@@ -444,12 +525,24 @@ async def stream_subreddit_comments(subreddit_name: str):
     
     try:
         reddit_client = await initialize_reddit()
-        subreddit = await reddit_client.subreddit(subreddit_name)
+        
+        # Use rate limiting for the subreddit lookup
+        subreddit = await rate_limited_request(reddit_client.subreddit, subreddit_name)
         logger.info(f"Starting to stream comments from r/{subreddit_name}")
+        
+        # For exponential backoff
+        backoff_time = 5
+        max_backoff = 300  # 5 minutes maximum
         
         while True:
             try:
                 async for comment in subreddit.stream.comments():
+                    # Record successful request
+                    update_rate_limit(200)
+                    
+                    # Reset backoff time on successful requests
+                    backoff_time = 5
+                    
                     # Get comment text
                     comment_text = comment.body
                     
@@ -472,9 +565,62 @@ async def stream_subreddit_comments(subreddit_name: str):
                         timestamp,
                         str(comment.subreddit)
                     )
+            except asyncpraw.exceptions.RedditAPIException as e:
+                # Handle API exceptions with detailed logging
+                if any(error.error_type == "RATELIMIT" for error in e.items):
+                    logger.error(f"Comment stream hit Reddit rate limit for r/{subreddit_name}: {e}")
+                    # Record rate limit error
+                    update_rate_limit(429)
+                    
+                    for error in e.items:
+                        if error.error_type == "RATELIMIT":
+                            logger.info(f"Rate limit error details: {error.message}")
+                            # Some rate limit errors include time in message like "Try again in X minutes"
+                            import re
+                            time_match = re.search(r'(\d+) minute', error.message)
+                            if time_match:
+                                wait_mins = int(time_match.group(1))
+                                backoff_time = max(backoff_time, wait_mins * 60)
+                    
+                    # Update backoff tracking
+                    rate_limit_info["backoff_until"] = time.time() + backoff_time
+                    
+                    logger.info(f"Backing off for {backoff_time} seconds before retrying")
+                    await asyncio.sleep(backoff_time)
+                    # Exponential backoff, but cap at max_backoff
+                    backoff_time = min(backoff_time * 2, max_backoff)
+                else:
+                    logger.error(f"Reddit API error for r/{subreddit_name}: {e}")
+                    await asyncio.sleep(backoff_time)
+            except aiohttp.ClientResponseError as e:
+                # More detailed logging for HTTP errors
+                if e.status == 429:
+                    logger.error(f"Comment stream rate limited (HTTP 429) for r/{subreddit_name}: {e}")
+                    # Record rate limit error with headers if available
+                    update_rate_limit(429, getattr(e, 'headers', None))
+                    
+                    logger.info(f"Response headers: {e.headers if hasattr(e, 'headers') else 'No headers available'}")
+                    
+                    # Check for Retry-After header
+                    retry_after = e.headers.get('Retry-After') if hasattr(e, 'headers') else None
+                    if retry_after and retry_after.isdigit():
+                        backoff_time = int(retry_after)
+                        logger.info(f"Using Retry-After value: {backoff_time} seconds")
+                    
+                    # Update backoff tracking
+                    rate_limit_info["backoff_until"] = time.time() + backoff_time
+                    
+                    logger.info(f"Backing off for {backoff_time} seconds before retrying")
+                    await asyncio.sleep(backoff_time)
+                    # Exponential backoff, but cap at max_backoff
+                    backoff_time = min(backoff_time * 2, max_backoff)
+                else:
+                    logger.error(f"HTTP error for r/{subreddit_name}: {e}")
+                    await asyncio.sleep(backoff_time)
             except Exception as e:
                 logger.error(f"Comment stream error for r/{subreddit_name}, reconnecting: {e}")
-                await asyncio.sleep(5)
+                logger.info(f"Error type: {type(e).__name__}")
+                await asyncio.sleep(backoff_time)
     except Exception as e:
         logger.error(f"Failed to start streaming comments for r/{subreddit_name}: {e}")
     finally:
@@ -490,12 +636,24 @@ async def stream_subreddit_submissions(subreddit_name: str):
     
     try:
         reddit_client = await initialize_reddit()
-        subreddit = await reddit_client.subreddit(subreddit_name)
+        
+        # Use rate limiting for the subreddit lookup
+        subreddit = await rate_limited_request(reddit_client.subreddit, subreddit_name)
         logger.info(f"Starting to stream submissions from r/{subreddit_name}")
+        
+        # For exponential backoff
+        backoff_time = 5
+        max_backoff = 300  # 5 minutes maximum
         
         while True:
             try:
                 async for submission in subreddit.stream.submissions():
+                    # Record successful request
+                    update_rate_limit(200)
+                    
+                    # Reset backoff time on successful requests
+                    backoff_time = 5
+                    
                     # Get content from either title or selftext
                     title_text = submission.title
                     selftext = getattr(submission, "selftext", "")
@@ -520,9 +678,62 @@ async def stream_subreddit_submissions(subreddit_name: str):
                         timestamp,
                         str(submission.subreddit)
                     )
+            except asyncpraw.exceptions.RedditAPIException as e:
+                # Handle API exceptions with detailed logging
+                if any(error.error_type == "RATELIMIT" for error in e.items):
+                    logger.error(f"Submission stream hit Reddit rate limit for r/{subreddit_name}: {e}")
+                    # Record rate limit error
+                    update_rate_limit(429)
+                    
+                    for error in e.items:
+                        if error.error_type == "RATELIMIT":
+                            logger.info(f"Rate limit error details: {error.message}")
+                            # Some rate limit errors include time in message like "Try again in X minutes"
+                            import re
+                            time_match = re.search(r'(\d+) minute', error.message)
+                            if time_match:
+                                wait_mins = int(time_match.group(1))
+                                backoff_time = max(backoff_time, wait_mins * 60)
+                    
+                    # Update backoff tracking
+                    rate_limit_info["backoff_until"] = time.time() + backoff_time
+                    
+                    logger.info(f"Backing off for {backoff_time} seconds before retrying")
+                    await asyncio.sleep(backoff_time)
+                    # Exponential backoff, but cap at max_backoff
+                    backoff_time = min(backoff_time * 2, max_backoff)
+                else:
+                    logger.error(f"Reddit API error for r/{subreddit_name}: {e}")
+                    await asyncio.sleep(backoff_time)
+            except aiohttp.ClientResponseError as e:
+                # More detailed logging for HTTP errors
+                if e.status == 429:
+                    logger.error(f"Submission stream rate limited (HTTP 429) for r/{subreddit_name}: {e}")
+                    # Record rate limit error with headers if available
+                    update_rate_limit(429, getattr(e, 'headers', None))
+                    
+                    logger.info(f"Response headers: {e.headers if hasattr(e, 'headers') else 'No headers available'}")
+                    
+                    # Check for Retry-After header
+                    retry_after = e.headers.get('Retry-After') if hasattr(e, 'headers') else None
+                    if retry_after and retry_after.isdigit():
+                        backoff_time = int(retry_after)
+                        logger.info(f"Using Retry-After value: {backoff_time} seconds")
+                    
+                    # Update backoff tracking
+                    rate_limit_info["backoff_until"] = time.time() + backoff_time
+                    
+                    logger.info(f"Backing off for {backoff_time} seconds before retrying")
+                    await asyncio.sleep(backoff_time)
+                    # Exponential backoff, but cap at max_backoff
+                    backoff_time = min(backoff_time * 2, max_backoff)
+                else:
+                    logger.error(f"HTTP error for r/{subreddit_name}: {e}")
+                    await asyncio.sleep(backoff_time)
             except Exception as e:
                 logger.error(f"Submission stream error for r/{subreddit_name}, reconnecting: {e}")
-                await asyncio.sleep(5)
+                logger.info(f"Error type: {type(e).__name__}")
+                await asyncio.sleep(backoff_time)
     except Exception as e:
         logger.error(f"Failed to start streaming submissions for r/{subreddit_name}: {e}")
     finally:
@@ -1009,3 +1220,78 @@ async def load_keywords_from_db():
     finally:
         if conn:
             release_db_connection(conn) 
+
+# Add new endpoint to get rate limit information
+@router.get("/rate-limits")
+async def get_rate_limits(
+    auth: Tuple[str, str] = Depends(validate_api_key)
+):
+    """Get information about current rate limit status."""
+    now = time.time()
+    
+    # Calculate some statistics
+    last_hour_requests = len([t for t, _ in rate_limit_info["history"] if t > now - 3600])
+    last_hour_429s = len([t for t, s in rate_limit_info["history"] if t > now - 3600 and s == 429])
+    
+    # Create response
+    response = {
+        "current_status": {
+            "total_requests": rate_limit_info["requests"],
+            "total_429_errors": rate_limit_info["errors_429"],
+            "requests_last_hour": last_hour_requests,
+            "429_errors_last_hour": last_hour_429s,
+            "remaining_assumed": rate_limit_info["remaining"],
+            "in_backoff": now < rate_limit_info["backoff_until"],
+            "backoff_seconds_remaining": max(0, int(rate_limit_info["backoff_until"] - now)) if rate_limit_info["backoff_until"] > now else 0
+        },
+        "active_streams": {
+            subreddit: {
+                "active": data["task"] is not None,
+                "status": [
+                    "running" if not t.done() else 
+                    "completed" if not t.cancelled() else 
+                    "cancelled" 
+                    for t in data["task"]
+                ] if data["task"] is not None else None
+            } for subreddit, data in active_streams.items()
+        }
+    }
+    
+    return response 
+
+# Add endpoint to manually adjust streaming settings
+@router.post("/adjust-streaming")
+async def adjust_streaming(
+    stagger_delay: int = 2,
+    backoff_time: int = 5,
+    max_backoff: int = 300,
+    auth: Tuple[str, str] = Depends(validate_admin)  # Only admins can adjust settings
+):
+    """Adjust streaming settings to help with rate limiting."""
+    global rate_limit_info
+    
+    # Store settings in rate_limit_info
+    rate_limit_info["settings"] = {
+        "stagger_delay": stagger_delay,
+        "backoff_time": backoff_time,
+        "max_backoff": max_backoff
+    }
+    
+    # Force a reset of streams with new settings
+    logger.info(f"Adjusting streaming settings: stagger_delay={stagger_delay}s, backoff_time={backoff_time}s, max_backoff={max_backoff}s")
+    
+    # Reset all streams
+    for subreddit in list(active_streams.keys()):
+        if active_streams[subreddit]["task"] is not None:
+            await stop_subreddit_stream(subreddit)
+    
+    # Wait a moment for all streams to stop
+    await asyncio.sleep(2)
+    
+    # Restart streams with staggered delays
+    await update_active_streams()
+    
+    return {
+        "message": "Streaming settings adjusted",
+        "settings": rate_limit_info["settings"]
+    } 
