@@ -1,3 +1,4 @@
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from backend.fastapi.dependencies.database import init_db, AsyncSessionLocal
@@ -18,9 +19,11 @@ async def lifespan(app: FastAPI):
         finally:
             await db.close()
     
-    # Start Reddit comment streaming
-    await start_streaming()
-    
+    if os.getenv("ENV_NAME") != "STAGING":
+        # Start Reddit comment streaming
+        await start_streaming()
+    else:
+        print("Skipping Reddit comment streaming in STAGING environment")
     yield
     
     # Cleanup code here if needed
