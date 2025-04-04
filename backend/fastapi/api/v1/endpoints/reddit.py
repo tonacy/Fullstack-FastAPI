@@ -15,6 +15,8 @@ from psycopg2.extras import Json
 from datetime import datetime
 from contextlib import asynccontextmanager
 from typing import Optional, Tuple, Literal, Dict, Set, List
+# from sse import create_sse_server
+# from mcp_instance import mcp
 
 # Create router
 router = APIRouter()
@@ -48,6 +50,7 @@ stderr_handler.setFormatter(formatter)
 # Add handlers to logger
 logger.addHandler(stdout_handler)
 logger.addHandler(stderr_handler)
+
 
 # Rate limit tracking
 rate_limit_info = {
@@ -557,7 +560,7 @@ def get_polling_delay(subreddit_name):
     high_traffic = ["all", "popular", "AskReddit", "funny", "gaming", "pics"]
     
     if subreddit_name in high_traffic:
-        return 15  # 15 seconds for high traffic subreddits
+        return 10  # 10 seconds for high traffic subreddits
     return 5  # 5 seconds for normal subreddits
 
 async def stream_subreddit_comments(subreddit_name: str):
