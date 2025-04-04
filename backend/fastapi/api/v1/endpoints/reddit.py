@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 from typing import Optional, Tuple, Literal, Dict, Set, List
 # from sse import create_sse_server
 # from mcp_instance import mcp
+from .webhook import call_webhook
 
 # Create router
 router = APIRouter()
@@ -354,33 +355,6 @@ async def save_match(match_data):
         if conn:
             release_db_connection(conn)
 
-async def call_webhook(client_id, match_data):
-    """Call the client's webhook URL with match data if configured."""
-    webhook_url = client_keywords.get(client_id, {}).get("webhook_url")
-    if not webhook_url:
-        return
-    
-    try:
-        webhook_payload = {
-            "client_id": match_data["client_id"],
-            "group_id": match_data["group_id"],
-            "keyword": match_data["keyword"],
-            "content_text": match_data["content_text"][:200],  # Truncate to 200 characters
-            "permalink": match_data["permalink"],
-            "subreddit": match_data["subreddit"],
-            "timestamp": match_data["timestamp"],
-            "content_type": match_data["content_type"]
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(webhook_url, json=webhook_payload) as response:
-                if response.status >= 400:
-                    logger.error(f"Webhook call failed for client {client_id}: {response.status}")
-                else:
-                    logger.info(f"Webhook called successfully for client {client_id}")
-    except Exception as e:
-        logger.error(f"Error calling webhook for client {client_id}: {e}")
-
 async def check_content_for_keywords(content_text, content_type, content_obj, subreddit_obj, timestamp, subreddit_name):
     """Process content (comment or submission) and check for keyword matches."""
     
@@ -425,7 +399,7 @@ async def check_content_for_keywords(content_text, content_type, content_obj, su
                     }
                     await save_match(match_data)
                     # Call webhook if client has one configured
-                    await call_webhook(client_id, match_data)
+                    await call_webhook(client_id, match_data, client_keywords, logger)
                     # Truncate content for logs
                     logger.info(f"MATCH: {client_id}/{group_id}: {keyword} - {content_type} - r/{subreddit_name} - {content_text[:50]}...")
                     
