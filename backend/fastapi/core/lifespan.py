@@ -23,7 +23,7 @@ async def lifespan(app: FastAPI):
         # Start Reddit comment streaming
         await start_streaming()
     else:
-        print("Skipping Reddit comment streaming in STAGING environment")
+        print("Skipping Reddit comment streaming on STAGING environment")
     yield
     
     # Cleanup code here if needed
